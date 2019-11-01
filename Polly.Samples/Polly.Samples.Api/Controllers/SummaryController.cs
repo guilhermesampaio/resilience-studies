@@ -1,15 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Polly.CircuitBreaker;
 using Polly.Fallback;
 using Polly.Retry;
-using Polly.Wrap;
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
 
 namespace Polly.Samples.Api.Controllers
 {
@@ -24,19 +19,32 @@ namespace Polly.Samples.Api.Controllers
     [ApiController]
     public class SummaryController : ControllerBase
     {
+        private static readonly int _retryCount = 3;
+
         private readonly HttpClient _httpClient;
 
         private readonly AsyncRetryPolicy<HttpResponseMessage> _httpRetryPolicy;
-                
-        private static readonly AsyncCircuitBreakerPolicy<HttpResponseMessage> _breakerPolicy = 
+
+        private static readonly AsyncFallbackPolicy<HttpResponseMessage> _fallBackPolicy =
+            Policy<HttpResponseMessage>
+                .Handle<BrokenCircuitException>()
+                .FallbackAsync(
+                    new HttpResponseMessage() { StatusCode = System.Net.HttpStatusCode.BadRequest },
+                    (httpResponse) =>
+                    {
+                        Console.WriteLine("Executando fallback");
+                        return Task.CompletedTask;
+                    });
+
+        private static readonly AsyncCircuitBreakerPolicy<HttpResponseMessage> _breakerPolicy =
             Policy
                 .HandleResult<HttpResponseMessage>(it => !it.IsSuccessStatusCode)
-                .CircuitBreakerAsync(1, TimeSpan.FromSeconds(10));
-
-        private static readonly AsyncFallbackPolicy<HttpResponseMessage> _fallBackPolicy = 
-            Policy<HttpResponseMessage>
-                .Handle<BrokenCircuitException>()                
-                .FallbackAsync(new HttpResponseMessage() { StatusCode = System.Net.HttpStatusCode.BadRequest });
+                .CircuitBreakerAsync(
+                    _retryCount,
+                    TimeSpan.FromSeconds(10),
+                    (response, circuitState, timeSpan, context) => Console.WriteLine($"Circuito Aberto -> HttpResponse:{response.Result.StatusCode}, CircuitState: {circuitState}, TimeSpan:{timeSpan}"),
+                    (context) => Console.WriteLine($"Circuito Fechado"),
+                    () => Console.WriteLine("Circuito Half Open"));
 
         private const string _baseUri = "http://localhost:5000";
 
@@ -71,14 +79,19 @@ namespace Polly.Samples.Api.Controllers
             var custodyPath = $"{_baseUri}/position/custody";
             var custodyEndpoint = new Uri(custodyPath);
 
-            //var response = await _fallBackPolicy
-            //    .WrapAsync(_breakerPolicy)
-            //    .ExecuteAsync(() => _httpClient.GetAsync(custodyEndpoint));
+            var waitRetryPolicy = Policy
+                .HandleResult<HttpResponseMessage>(it => !it.IsSuccessStatusCode)
+                .WaitAndRetryAsync(
+                    _retryCount,
+                    (retry) => TimeSpan.FromSeconds(Math.Pow(retry, 2)),
+                    (httpResponse, timeSpan, count, context) => Console.WriteLine($"Realizando retentativa -> {Response}, {timeSpan}, {count}, {context}"));
 
-            var response = await _breakerPolicy
+            var response = await _fallBackPolicy
+                .WrapAsync(waitRetryPolicy)
+                .WrapAsync(_breakerPolicy)
                 .ExecuteAsync(() => _httpClient.GetAsync(custodyEndpoint));
 
-            return StatusCode((int)response.StatusCode, new { });
+            return StatusCode((int)response.StatusCode, new { response.StatusCode });
         }
     }
 }

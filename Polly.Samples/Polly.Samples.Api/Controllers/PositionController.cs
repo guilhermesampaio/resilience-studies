@@ -27,7 +27,7 @@ namespace Polly.Samples.Position.Controllers
         {
             _custodyRequests++;
 
-            if(_custodyRequests % 5 == 0)
+            if(_custodyRequests <= 6)
                 return StatusCode((int)HttpStatusCode.GatewayTimeout);
 
             return Ok();
